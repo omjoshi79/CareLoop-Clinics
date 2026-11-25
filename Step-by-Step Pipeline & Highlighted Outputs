@@ -1,0 +1,118 @@
+### Part 1 — Data Foundations: Ingest, Clean & Enrich (`01_ingest_clean.ipynb`)
+
+> [!TIP]
+> **Highlighted Outputs Generated:**
+> * **`rejected_rows.json`** — **32** type-invalid rows quarantined (12 blank `age`, 20 blank `distance_km`); 988 rows passed type checks.
+> * **`clinics_enriched.csv`** — **8** clinics enriched with live midnight-UTC `temp_c` from the Open-Meteo Forecast API.
+> * **`appointments_clean.csv`** — **990** cleaned rows × **16** exact columns, sorted by `appointment_id`, with **0** missing values.
+> * **`load_data.sql`** — **998** `INSERT` statements (**8** `clinics` rows first, followed by **990** `appointments` rows).
+
+| Step | Operation | Key Output & Data Transformation |
+|---|---|---|
+| **1.1** | Foundation CSV read (`csv.DictReader`) | Read **1,020** raw rows → **988** accepted, **32** saved to `rejected_rows.json`. |
+| **1.2** | Pandas pass 1 (dedupe, labels, dates) | `1,020` → `1,000` (-20 duplicates) → `990` (-6 unreadable dates, -4 blank statuses); `booking_channel` collapsed from **16** raw spellings to **3** (`App`, `Phone`, `Walk-In`). |
+| **1.3** | Pandas pass 2 (validity, gaps, IQR caps) | Flagged **5** impossible ages (17 missing total), imputed medians (`age = 48`, `distance_km = 8.25`), and capped **26** `distance_km` (`25.5625` fence) and **3** `fee_inr` (`1218.75` fence; max fee `1,219`) outliers. |
+| **1.4** | Feature engineering & NumPy summary | Added `lead_days` (`1–45` days) and `no_show` (**218** no-shows / **22.0%**); column means `[48.17, 9.50, 635.71, 11.82]`; **296** rows (**29.9%**) with `lead_days > 14`; **53** rows with `\|z\| > 2` on distance. |
+| **1.5** | Live weather API enrichment | Queried Open-Meteo API with retry/fallback logic for all **8** clinics → `clinics_enriched.csv`. |
+| **1.6** | Export & SQL script generation | Verified 990 unique `appointment_id` values and 0 nulls → exported `appointments_clean.csv` and `load_data.sql` (**998** `INSERT` statements). |
+
+---
+
+### Part 2 — SQL Verification & No-Show Clustering (`02_queries.sql`)
+
+> [!TIP]
+> **Highlighted Outputs Generated:**
+> * **`02_queries.sql`** — Relational DDL (`clinics` + `appointments`), analytical queries for Tasks 2.1–2.5, and the recorded duplicate primary-key error message (`'A0001'`).
+
+* **Task 2.1 (Relational Load & PK Check):** Verified **8** clinics, **990** appointments, and **218** no-shows (exact match with Part 1); inserting duplicate `appointment_id = 'A0001'` failed with a primary-key constraint error.
+* **Task 2.2 (Clinic No-Show Rates & Python `groupby` Parity):**
+
+| Clinic Name | City | Appointments | No-Shows | No-Show % | Meets `HAVING >= 95`? |
+|---|---|---:|---:|---:|---|
+| **Gomti Nagar Care Point** | Lucknow | 90 | 30 | **33.3%** | No (highest overall when `HAVING` removed) |
+| **Hadapsar Care Centre** | Pune | 143 | 39 | **27.3%** | Yes (Rank #1 among ≥ 95 appts) |
+| **Malviya Nagar Clinic** | Jaipur | 142 | 38 | **26.8%** | Yes |
+| **Kothrud Family Clinic** | Pune | 160 | 36 | **22.5%** | Yes |
+| **Vijay Nagar Clinic** | Indore | 101 | 21 | **20.8%** | Yes |
+| **Edappally Medical Centre** | Kochi | 142 | 23 | **16.2%** | Yes |
+| **Sitabuldi Health Point** | Nagpur | 82 | 13 | **15.9%** | No |
+| **Vaishali Nagar Clinic** | Jaipur | 130 | 18 | **13.8%** | Yes |
+
+* **Task 2.3 (Lead-Time Bands via `CASE WHEN`):**
+  * **`1-7` days:** 390 appointments · 63 no-shows · **16.2%**
+  * **`8-14` days:** 304 appointments · 53 no-shows · **17.4%**
+  * **`15-30` days:** 253 appointments · 76 no-shows · **30.0%**
+  * **`31+` days:** 43 appointments · 26 no-shows · **60.5%**
+* **Task 2.4 (Monthly Trend via CTE + `LAG`):**
+  * `2025-01`: 157 (**24.8%**, `NULL`) → `2025-02`: 151 (**20.5%**, `-4.3` pp) → `2025-03`: 142 (**20.4%**, `-0.1` pp) → `2025-04`: 177 (**20.9%**, `+0.5` pp) → `2025-05`: 198 (**23.7%**, `+2.8` pp) → `2025-06`: 165 (**21.2%**, `-2.5` pp).
+* **Task 2.5 (City Rankings vs. `22.02%` Overall):** **4** clinics ranked `above` overall (Gomti Nagar, Hadapsar, Malviya Nagar, Kothrud) and **4** ranked `below` overall (Vijay Nagar, Edappally, Sitabuldi, Vaishali Nagar).
+
+---
+
+### Part 3 — Machine Learning: Risk Prediction & Threshold Tuning (`03_model.ipynb`)
+
+> [!TIP]
+> **Highlighted Outputs Generated:**
+> * **`test_risk_scores.csv`** — **198** test-set rows (`appointment_id`, `no_show`, `risk_prob`, `flag`) with **~49** bookings flagged at the **0.35** threshold.
+
+* **Task 3.1 (Split & Baseline):** Built **11** features across **990** rows (`792` train / `198` test, `random_state=42`); test set contains **49** no-shows, giving a majority-class baseline accuracy of **0.7525** (149/198).
+* **Task 3.2 (Logistic Regression & Odds Ratios):** Test accuracy **~0.788**, precision **~0.63**, recall **~0.35**, F1 **~0.45**, ROC-AUC **~0.789**. `reminder_sent` had the strongest negative coefficient (**~ -0.58**, SD **~0.49**): `np.exp(coef)` = **~0.56** (per 1 SD) vs. `np.exp(coef / scale)` = **~0.31** (**~69% lower odds** for `No → Yes`, holding other features constant).
+* **Tasks 3.3 & 3.4 (Model Benchmarks):**
+
+| Model | Train Accuracy | Test Accuracy | Test Recall | Test ROC-AUC |
+|---|---:|---:|---:|---:|
+| **Logistic Regression** | — | **~0.788** | **~0.35** | **~0.789** |
+| **Decision Tree (full depth ~15)** | 1.000 | ~0.670 | — | — |
+| **Decision Tree (`max_depth=3`)** | ~0.820 | ~0.780 | — | — |
+| **Random Forest (100 trees)** | 1.000 | ~0.750 | ~0.31 | ~0.710 |
+
+* **Task 3.5 (Training-Only CV Selection & Threshold Calibration):**
+  * **5-Fold CV ROC-AUC (Train Only):** Logistic Regression `Pipeline` (**~0.77**) ≥ Tuned Random Forest (**~0.77**) > Default Random Forest (**~0.75**) > Depth-3 Tree (**~0.68**).
+  * **Out-of-Fold Threshold Choice:** `0.35` (Precision **~0.51**, Recall **~0.47**, F1 **~0.49**, **~154** flagged) beat `0.50` (Precision **~0.58**, Recall **~0.25**, F1 **~0.35**, **~73** flagged).
+  * **Single Test-Set Evaluation (`threshold = 0.35`):** Precision **~0.57**, Recall **~0.57**, **~49** flagged out of 198, ROC-AUC **~0.79**.
+
+---
+
+### Part 4 — GenAI Follow-Up Review (`04_genai.ipynb`)
+
+> [!TIP]
+> **Highlighted Outputs Generated:**
+> * **`notes_analysed.csv`** — **10** rows × **8** columns (`note_id`, `appointment_id`, `root_cause`, `confidence`, `summary`, `recommended_action`, `validation_status`, `raw_response`).
+> * **API Call Budget:** **12–14** total Gemini API calls used across Tasks 4.1–4.3 (well below the 25-call free-tier cap; API key entered via runtime `input()` and scrubbed).
+
+* **Tasks 4.1 & 4.2 (CRAFT Extraction & Pydantic Guardrails):** Classified 9 non-blank notes (`valid`) and safely bypassed blank note `N004` (`skipped_blank`, `confidence = 0.0`, 0 API calls):
+
+| Note ID | Extracted `root_cause` | Status | `reminder_sent` (Merged) |
+|---|---|---|---|
+| `N001` | `forgot_or_no_reminder` | `valid` | **No** |
+| `N002` | `distance_or_transport` | `valid` | Yes |
+| `N003` | `cost_or_fee` | `valid` | No |
+| `N004` | `other` *(blank note)* | `skipped_blank` | Yes |
+| `N005` | `illness_or_emergency` | `valid` | Yes |
+| `N006` | `work_or_schedule` | `valid` | No |
+| `N007` | `forgot_or_no_reminder` *(Hinglish)* | `valid` | **No** |
+| `N008` | `distance_or_transport` | `valid` | Yes |
+| `N009` | `other` *(ambiguous)* | `valid` | Yes |
+| `N010` | `work_or_schedule` | `valid` | No |
+
+* **Task 4.3 (Adversarial & Prompt Stress Tests):** Caught Pydantic `ValidationError` exceptions for `confidence = 1.7` (`less than or equal to 1`) and missing `recommended_action` (`Field required`); confirmed V2 (CRAFT) cleanly maps Hinglish (`N007`) and ambiguous (`N009`) notes into allowed categories compared to minimal prompt V1.
+* **Task 4.4 (Cross-Tabulation):** Merging `notes_analysed.csv` with `appointments_clean.csv` confirmed **2 of 2 (100%)** `forgot_or_no_reminder` cases had `reminder_sent = No` (and **5 of 10** notes overall lacked a reminder).
+
+---
+
+## Repository Structure
+
+| File / Folder | Description |
+|---|---|
+| `data/` | Original unedited `appointments.csv`, `clinics.csv`, and `followup_notes.csv` |
+| `01_ingest_clean.ipynb` | Part 1 Python ingestion, validation, cleaning, API enrichment, and SQL export |
+| `rejected_rows.json` | 32 type-rejected records from `csv.DictReader` |
+| `clinics_enriched.csv` | 8 clinic master records enriched with Open-Meteo `temp_c` |
+| `appointments_clean.csv` | 990 cleaned booking records (16 columns, sorted by `appointment_id`) |
+| `load_data.sql` | 998 `INSERT` statements (8 clinics followed by 990 appointments) |
+| `02_queries.sql` | Part 2 table DDL, analytical queries, and commented duplicate-key error |
+| `03_model.ipynb` | Part 3 feature engineering, baseline, model comparison, CV selection, and threshold tuning |
+| `test_risk_scores.csv` | 198 test-set risk probabilities and `0.35`-threshold call flags |
+| `04_genai.ipynb` | Part 4 Gemini API extraction, Pydantic validation, prompt comparison, and cross-tabulation |
+| `notes_analysed.csv` | 10 structured call-centre note classifications with raw JSON responses |
+| `README.md` | Project summary, business recommendation, model choice, limitations, and outputs |
