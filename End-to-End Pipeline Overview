@@ -1,0 +1,64 @@
+### Part 1 — Data Foundations: Ingest, Clean & Enrich
+* **Steps Performed:**
+  * Read raw `appointments.csv` using Python's `csv.DictReader` and separated 988 type-valid rows from 32 rejected rows.
+  * Reloaded raw data in `pandas` to drop 20 exact duplicates, standardize 16 `booking_channel` spellings into 3 (`App`, `Phone`, `Walk-In`), parse dates, and drop 10 rows with missing/unreadable `appt_date` or `status`.
+  * Flagged 5 impossible ages (`< 1` or `> 100`), imputed missing `age` (median 48) and `distance_km` (median 8.25), and capped 26 distance and 3 fee outliers using IQR fences.
+  * Engineered `lead_days` and `no_show` (218 no-shows / 22.0%) and computed vectorized NumPy column means, lead-time shares, and distance z-scores.
+  * Queried live midnight-UTC temperatures for all 8 clinics with retry/fallback handling, then exported the sorted 16-column table and generated 998 SQL `INSERT` statements.
+* **Resources Used:** Google Colab, Python (`csv`, `json`, `pandas`, `NumPy`, `requests`), Open-Meteo Forecast API, `data/appointments.csv`, `data/clinics.csv`.
+* **Outputs Generated:**
+  * `01_ingest_clean.ipynb`
+  * `rejected_rows.json` (32 rows)
+  * `clinics_enriched.csv` (8 clinics + `temp_c`)
+  * `appointments_clean.csv` (990 rows, 16 columns, 0 nulls)
+  * `load_data.sql` (8 clinic + 990 appointment `INSERT` statements)
+
+### Part 2 — SQL Verification & No-Show Clustering
+* **Steps Performed:**
+  * Created the `clinics` and `appointments` tables with primary and foreign keys, ran `load_data.sql`, and verified 8 clinics, 990 appointments, and 218 no-shows.
+  * Tested primary-key enforcement by inserting duplicate `appointment_id = 'A0001'` and recorded the error.
+  * Aggregated no-show rates by clinic (with and without `HAVING COUNT(*) >= 95`) and verified exact parity using Python `groupby`.
+  * Grouped `lead_days` into four bands via `CASE WHEN` (showing rates rising from 16.2% for 1–7 days to 60.5% for 31+ days), tracked monthly percentage-point changes with a CTE + `LAG()`, and ranked clinics within each city using `RANK()` and a scalar subquery.
+* **Resources Used:** MySQL Workbench (MySQL 8) / SQLiteOnline / Python `sqlite3` in Colab, `load_data.sql`, `appointments_clean.csv`, `clinics_enriched.csv`.
+* **Outputs Generated:**
+  * `02_queries.sql` (table DDL, Tasks 2.1–2.5 queries, and the duplicate-key error saved as a comment)
+
+### Part 3 — Machine Learning: Risk Prediction & Threshold Tuning
+* **Steps Performed:**
+  * Built an 11-feature matrix (`X`) with one-hot encoded `booking_channel` and `visit_type`, split 80/20 (`random_state=42`), and established the 0.7525 majority-class baseline (49 test no-shows).
+  * Trained Logistic Regression on scaled features, reporting both the per-SD (~0.56) and raw No-to-Yes (~0.31, ~69% lower odds) `reminder_sent` odds ratios.
+  * Compared full-depth vs. depth-3 Decision Trees (demonstrating overfitting) and a 100-tree Random Forest.
+  * Tuned Random Forest with 5-fold `GridSearchCV` and selected Logistic Regression (`Pipeline`) using training-only 5-fold CV ROC-AUC (~0.77).
+  * Selected the 0.35 probability threshold on out-of-fold training predictions (higher F1 ~0.49 and recall) and evaluated once on the test set (ROC-AUC ~0.79, ~49 flagged).
+* **Resources Used:** Google Colab, Python (`pandas`, `NumPy`, `scikit-learn`: `StandardScaler`, `LogisticRegression`, `DecisionTreeClassifier`, `RandomForestClassifier`, `Pipeline`, `GridSearchCV`), `appointments_clean.csv`.
+* **Outputs Generated:**
+  * `03_model.ipynb`
+  * `test_risk_scores.csv` (198 test rows with `appointment_id`, `no_show`, `risk_prob`, `flag`)
+
+### Part 4 — GenAI Follow-Up Review & Business Recommendation
+* **Steps Performed:**
+  * Built `analyse_note()` with a CRAFT prompt, `temperature=0`, and a 4-field JSON schema, testing it on note `N001`.
+  * Processed the first 10 notes with Pydantic `FollowupInsight` validation and an allowed-list check, skipping blank note `N004` (`skipped_blank`, no API call) and pausing 13 seconds between calls.
+  * Stress-tested Pydantic with two deliberately bad payloads (`confidence = 1.7` and missing `recommended_action`) and compared minimal V1 vs. CRAFT V2 prompts on `N007` (Hinglish) and `N009` (ambiguous), staying under 25 total API calls (~12–14 calls).
+  * Merged `notes_analysed.csv` with `appointments_clean.csv` to cross-tabulate `root_cause` against `reminder_sent` (confirming 2 of 2 `forgot_or_no_reminder` cases had `reminder_sent = No`).
+* **Resources Used:** Google Colab, Google AI Studio (free Gemini API key via runtime `input()`), `google-genai` (`gemini-3.5-flash-lite`), `pydantic`, `data/followup_notes.csv`, `appointments_clean.csv`.
+* **Outputs Generated:**
+  * `04_genai.ipynb` (with API key scrubbed and input cell output cleared)
+  * `notes_analysed.csv` (10 rows, 8 columns including `raw_response`)
+  * `README.md`
+
+---
+
+## Repository Structure
+* `data/` — Original unedited `appointments.csv`, `clinics.csv`, and `followup_notes.csv`
+* `01_ingest_clean.ipynb` — Part 1 ingestion, cleaning, feature engineering, API enrichment, and SQL generation
+* `rejected_rows.json` — 32 type-rejected rows from `csv.DictReader`
+* `clinics_enriched.csv` — 8 clinics with Open-Meteo `temp_c`
+* `appointments_clean.csv` — 990 cleaned bookings (16 columns, sorted by `appointment_id`)
+* `load_data.sql` — 998 `INSERT` statements (8 clinics followed by 990 appointments)
+* `02_queries.sql` — Part 2 DDL, analytical SQL queries, and commented duplicate-key error
+* `03_model.ipynb` — Part 3 feature preparation, baseline, model comparison, CV selection, and threshold tuning
+* `test_risk_scores.csv` — 198 test-set predictions (`appointment_id`, `no_show`, `risk_prob`, `flag`)
+* `04_genai.ipynb` — Part 4 Gemini API extraction, Pydantic validation, prompt comparison, and cross-tabulation
+* `notes_analysed.csv` — 10 structured call-centre note classifications with raw JSON responses
+* `README.md` — Project summary, recommendation, model justification, limitations, and pipeline documentation.
